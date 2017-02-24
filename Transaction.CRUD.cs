@@ -8,7 +8,7 @@ namespace EastFive.Persistence
 {
     public partial class Transaction<TFailure>
     {
-        public void AddTaskUpdate<TDocument>(
+        public void Update<TDocument>(
             Guid docId,
             Func<TDocument, bool> mutateUpdate,
             Func<TDocument, bool> mutateRollback,
@@ -42,7 +42,7 @@ namespace EastFive.Persistence
                 });
         }
         
-        public void AddTaskUpdate<TDocument>(
+        public void Update<TDocument>(
             Guid docId,
             Func<TDocument, bool> mutateUpdate,
             Func<TDocument, bool> mutateRollback,
@@ -82,7 +82,44 @@ namespace EastFive.Persistence
             public T carry;
         }
 
-        public void AddTaskUpdate<TDocument, TCarry>(
+
+        public void Update<TDocument, TCarry>(
+            Guid docId,
+            Func<TDocument, Carry<TCarry>?> mutateUpdate,
+            Func<TDocument, TCarry, bool> mutateRollback,
+            Func<TFailure> onNotFound)
+            where TDocument : class, ITableEntity
+        {
+            this.AddTask(
+                async (success, failure) =>
+                {
+                    var r = await repo.UpdateAsync<TDocument, Result>(docId,
+                        async (doc, saveAsync) =>
+                        {
+                            var updateResult = mutateUpdate(doc);
+                            if (!updateResult.HasValue)
+                                return success(() => true.ToTask());
+
+                            await saveAsync();
+                            return success(
+                                async () =>
+                                {
+                                    await repo.UpdateAsync<TDocument, bool>(docId,
+                                        async (docRollback, saveRollbackAsyc) =>
+                                        {
+                                            if (mutateRollback(docRollback, updateResult.Value.carry))
+                                                await saveRollbackAsyc();
+                                            return true;
+                                        },
+                                        () => false);
+                                });
+                        },
+                        () => failure(onNotFound()));
+                    return r;
+                });
+        }
+
+        public void Update<TDocument, TCarry>(
             Guid docId,
             Func<TDocument, Carry<TCarry>?> mutateUpdate,
             Func<TDocument, TCarry, bool> mutateRollback,
@@ -106,8 +143,8 @@ namespace EastFive.Persistence
                                     await repo.UpdateAsync<TDocument, bool>(docId,
                                         async (docRollback, saveRollbackAsyc) =>
                                         {
-                                            if (mutateRollback(docRollback)) ;
-                                            await saveRollbackAsyc();
+                                            if (mutateRollback(docRollback, updateResult.Value.carry))
+                                                await saveRollbackAsyc();
                                             return true;
                                         },
                                         () => false);
@@ -117,98 +154,21 @@ namespace EastFive.Persistence
                     return r;
                 });
         }
-
-        public static void AddTaskUpdate<T, TRollback, TDocument>(this RollbackAsync<TRollback> rollback,
-            Guid docId,
-            Func<TDocument, T> mutateUpdate,
-            Func<T, TDocument, bool> mutateRollback,
-            Func<TRollback> onNotFound,
-            AzureStorageRepository repo)
-            where TDocument : class, ITableEntity
-        {
-            rollback.AddTask(
-                async (success, failure) =>
-                {
-                    var r = await repo.UpdateAsync<TDocument, Carry<T>?>(docId,
-                        async (doc, save) =>
-                        {
-                            var carry = mutateUpdate(doc);
-                            await save(doc);
-                            return new Carry<T>
-                            {
-                                carry = carry,
-                            };
-                        },
-                        () => default(Carry<T>?));
-                    if (r.HasValue)
-                        return success(
-                            async () =>
-                            {
-                                await repo.UpdateAsync<TDocument, bool>(docId,
-                                    async (doc, save) =>
-                                    {
-                                        mutateRollback(r.Value.carry, doc);
-                                        await save(doc);
-                                        return true;
-                                    },
-                                    () => false);
-                            });
-                    return failure(onNotFound());
-                });
-        }
-
-        public static void AddTaskUpdate<T, TRollback, TDocument>(this RollbackAsync<T, TRollback> rollback,
-            Guid docId,
-            Func<TDocument, T> mutateUpdate,
-            Func<T, TDocument, bool> mutateRollback,
-            Func<TRollback> onNotFound,
-            AzureStorageRepository repo)
-            where TDocument : class, ITableEntity
-        {
-            rollback.AddTask(
-                async (success, failure) =>
-                {
-                    var r = await repo.UpdateAsync<TDocument, Carry<T>?>(docId,
-                        async (doc, save) =>
-                        {
-                            var carry = mutateUpdate(doc);
-                            await save(doc);
-                            return new Carry<T>
-                            {
-                                carry = carry,
-                            };
-                        },
-                        () => default(Carry<T>?));
-                    if (r.HasValue)
-                        return success(r.Value.carry,
-                            async () =>
-                            {
-                                await repo.UpdateAsync<TDocument, bool>(docId,
-                                    async (doc, save) =>
-                                    {
-                                        mutateRollback(r.Value.carry, doc);
-                                        await save(doc);
-                                        return true;
-                                    },
-                                    () => false);
-                            });
-                    return failure(onNotFound());
-                });
-        }
-
-        public static void AddTaskDeleteJoin<TRollback, TDocument>(this RollbackAsync<Guid?, TRollback> rollback,
+        
+        public void DeleteJoin<TRollback, TDocument>(
             Guid docId,
             Func<TDocument, Guid?> mutateDelete,
             Action<Guid, TDocument> mutateRollback,
-            Func<TRollback> onNotFound,
-            AzureStorageRepository repo)
+            Func<TRollback> onNotFound)
             where TDocument : class, ITableEntity
         {
-            rollback.AddTaskUpdate(docId,
+            this.Update<TDocument, Guid>(docId,
                 (TDocument doc) =>
                 {
                     var joinId = mutateDelete(doc);
-                    return joinId;
+                    if (joinId.HasValue)
+                        return new Carry<Guid>() { carry = joinId.Value };
+                    return default(Carry<Guid>?);
                 },
                 (joinId, doc) =>
                 {
